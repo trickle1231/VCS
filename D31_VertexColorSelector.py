@@ -10,7 +10,13 @@ bl_info = {
 
 import bpy
 import bmesh
-import bpy_extras
+
+# Blender 버전 호환성 처리
+try:
+    from bpy_extras import view3d_utils
+except ImportError:
+    import bpy_extras
+    view3d_utils = bpy_extras.view3d_utils
 
 VC_SELECTOR_THRESHOLD = 0.01
 
@@ -336,8 +342,8 @@ class VCS_OT_pick_vertex_color(bpy.types.Operator):
                 self.report({'ERROR'}, "No mesh object selected")
                 return {'CANCELLED'}
 
-            origin = bpy_extras.view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
-            direction = bpy_extras.view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+            origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+            direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
             depsgraph = context.evaluated_depsgraph_get()
 
             hit, location, normal, face_index, obj_ray, matrix = context.scene.ray_cast(
