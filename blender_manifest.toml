@@ -3,8 +3,13 @@ schema_version = "1.0.0"
 # Example of manifest file for a Blender extension
 # Change the values according to your extension
 id = "VCS"
+<<<<<<< HEAD
 version = "1.0.5"
 name = "Vertex Color Selector"
+=======
+version = "1.0.2"
+name = "VCS"
+>>>>>>> parent of 68ae73e (4.5지원)
 tagline = "VertexColor Select tool"
 maintainer = "D31"
 # Supported types: "add-on", "theme"
@@ -65,15 +70,11 @@ license = [
 
 # # Optional: advanced build settings.
 # # https://docs.blender.org/manual/en/dev/advanced/extensions/command_line_arguments.html#command-line-args-extension-build
-[build]
-# These are the default build excluded patterns.
-# You only need to edit them if you want different options.
-paths_exclude_pattern = [
-  "__pycache__/",
-  "/.git/",
-  "/*.zip",
-  ".gitattributes",
-  ".gitignore",
-  "LICENSE",
-  "README.md",
- ]
+# [build]
+# # These are the default build excluded patterns.
+# # You only need to edit them if you want different options.
+# paths_exclude_pattern = [
+#   "__pycache__/",
+#   "/.git/",
+#   "/*.zip",
+# ]
