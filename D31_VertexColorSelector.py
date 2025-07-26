@@ -60,6 +60,21 @@ class VERTEXCOLOR_OT_find_face_colors(bpy.types.Operator):
         if context.mode != 'EDIT_MESH':
             self.report({'ERROR'}, "Find Colors is only available in Edit Mode!")
             return {'CANCELLED'}
+        
+        # 컬러 어트리뷰트 검증
+        if not scene.vc_selector.color_attribute or scene.vc_selector.color_attribute == "NONE":
+            self.report({'ERROR'}, "No color attribute selected!")
+            return {'CANCELLED'}
+        
+        # 선택된 어트리뷰트가 실제로 존재하는지 확인
+        color_attr = obj.data.color_attributes.get(scene.vc_selector.color_attribute)
+        if not color_attr:
+            self.report({'ERROR'}, f"Color attribute '{scene.vc_selector.color_attribute}' not found!")
+            return {'CANCELLED'}
+        
+        if color_attr.domain != 'CORNER':
+            self.report({'ERROR'}, f"Color attribute '{scene.vc_selector.color_attribute}' must be CORNER domain!")
+            return {'CANCELLED'}
 
         current_mesh_id = obj.data.name if obj and obj.data else ""
         last_mesh_id = getattr(scene, "vc_selector_last_mesh_id", "")
@@ -113,6 +128,11 @@ class VERTEXCOLOR_OT_select_faces_by_face_color(bpy.types.Operator):
         obj = context.active_object
         mode = obj.mode
 
+        # 컬러 어트리뷰트 검증
+        if not scene.vc_selector.color_attribute or scene.vc_selector.color_attribute == "NONE":
+            self.report({'ERROR'}, "No color attribute selected!")
+            return {'CANCELLED'}
+
         target_color = eval(scene.vc_selector.face_colors)
         threshold = 0.01  # VC_SELECTOR_THRESHOLD로 대체
 
@@ -142,16 +162,11 @@ class VERTEXCOLOR_OT_select_faces_by_face_color(bpy.types.Operator):
 
         return {'FINISHED'}
 
-# 1. 컬러 미리보기 아래에 "Select This Color" 버튼 추가
-class VCSelectorColorPreview(bpy.types.PropertyGroup):
-    name: bpy.props.StringProperty()
-    color: bpy.props.FloatVectorProperty(subtype='COLOR_GAMMA', size=3, min=0.0, max=1.0)
-
 # 2. 컬러별 선택 오퍼레이터 추가
 class VERTEXCOLOR_OT_select_this_color(bpy.types.Operator):
     bl_idname = "mesh.select_this_color"
     bl_label = "Select This Color"
-    color: bpy.props.FloatVectorProperty(size=3)
+    color = bpy.props.FloatVectorProperty(size=3)
 
     def invoke(self, context, event):
         self.shift = event.shift
@@ -162,6 +177,12 @@ class VERTEXCOLOR_OT_select_this_color(bpy.types.Operator):
         scene = context.scene
         obj = context.active_object
         mode = obj.mode
+        
+        # 컬러 어트리뷰트 검증
+        if not scene.vc_selector.color_attribute or scene.vc_selector.color_attribute == "NONE":
+            self.report({'ERROR'}, "No color attribute selected!")
+            return {'CANCELLED'}
+        
         threshold = 0.01  # VC_SELECTOR_THRESHOLD로 대체
         target_color = tuple(self.color)
         shift = getattr(self, "shift", False)
@@ -238,15 +259,33 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
         scene = context.scene
         obj = context.active_object
 
-        # 컬러 속성 목록
-        attr_names = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER'] if obj and obj.type == 'MESH' else []
-        if not attr_names:
+        # 컬러 속성 목록 체크
+        corner_attrs = []
+        if obj and obj.type == 'MESH':
+            corner_attrs = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
+        
+        if not corner_attrs:
             box = layout.box()
-            box.label(text="No Color Attribute", icon='ERROR')
+            box.label(text="No CORNER Color Attributes Found", icon='ERROR')
+            if obj and obj.type == 'MESH' and obj.data.color_attributes:
+                box.label(text="(Only CORNER domain attributes supported)")
+                # 사용 가능한 어트리뷰트들 표시
+                for attr in obj.data.color_attributes:
+                    box.label(text=f"• {attr.name} ({attr.domain})", icon='DOT')
             return
 
-        # Color Attribute 선택 (한 번만!)
-        layout.prop(scene.vc_selector, "color_attribute", text="Color")
+        # Color Attribute 선택
+        attr_box = layout.box()
+        attr_box.label(text=f"Available Color Attributes: {len(corner_attrs)}")
+        row = attr_box.row()
+        row.prop(scene.vc_selector, "color_attribute", text="Color Attribute")
+        
+        # 현재 선택된 어트리뷰트가 유효한지 확인
+        current_attr = scene.vc_selector.color_attribute
+        if current_attr and current_attr not in corner_attrs:
+            box = layout.box()
+            box.label(text="Selected attribute not available!", icon='ERROR')
+            return
 
         is_edit_mode = (context.mode == 'EDIT_MESH')
 
@@ -306,7 +345,7 @@ class VCS_OT_pick_vertex_color(bpy.types.Operator):
     bl_description = "Pick vertex color from mesh under mouse cursor"
     bl_options = {'REGISTER', 'UNDO'}
 
-    color: bpy.props.FloatVectorProperty(
+    color = bpy.props.FloatVectorProperty(
         name="Picked Color",
         subtype='COLOR',
         size=3,
@@ -356,6 +395,11 @@ class VCS_OT_pick_vertex_color(bpy.types.Operator):
                 return {'CANCELLED'}
 
             color_attr_name = context.scene.vc_selector.color_attribute
+            
+            # 컬러 어트리뷰트 검증
+            if not color_attr_name or color_attr_name == "NONE":
+                self.report({'ERROR'}, "No color attribute selected!")
+                return {'CANCELLED'}
 
             if obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(obj.data)
@@ -446,31 +490,47 @@ class VCS_OT_pick_vertex_color(bpy.types.Operator):
 
 # --- PropertyGroup 정의 ---
 class VCSelectorColorPreview(bpy.types.PropertyGroup):
-    name: bpy.props.StringProperty()
-    color: bpy.props.FloatVectorProperty(subtype='COLOR_GAMMA', size=3, min=0.0, max=1.0)
+    name = bpy.props.StringProperty()
+    color = bpy.props.FloatVectorProperty(subtype='COLOR_GAMMA', size=3, min=0.0, max=1.0)
 
 class VCSelectorProperties(bpy.types.PropertyGroup):
-    face_colors: bpy.props.EnumProperty(
+    face_colors = bpy.props.EnumProperty(
         name="Face Colors",
         items=[]
     )
-    color_previews: bpy.props.CollectionProperty(type=VCSelectorColorPreview)
-    last_mesh_id: bpy.props.StringProperty(
+    color_previews = bpy.props.CollectionProperty(type=VCSelectorColorPreview)
+    last_mesh_id = bpy.props.StringProperty(
         name="Last Mesh ID",
         default=""
     )
-    show_color_list: bpy.props.BoolProperty(
+    show_color_list = bpy.props.BoolProperty(
         name="Show Color List",
         default=True
     )
+    
     def color_attr_items(self, context):
         obj = context.active_object
         if not obj or obj.type != 'MESH':
-            return []
-        return [(attr.name, attr.name, "") for attr in obj.data.color_attributes if attr.domain == 'CORNER']
-    color_attribute: bpy.props.EnumProperty(
+            return [("NONE", "No Color Attributes", "No mesh or no color attributes found")]
+        
+        items = []
+        for attr in obj.data.color_attributes:
+            if attr.domain == 'CORNER':
+                items.append((attr.name, attr.name, f"Color attribute: {attr.name}"))
+        
+        if not items:
+            return [("NONE", "No CORNER Attributes", "No CORNER domain color attributes found")]
+        
+        return items
+    
+    def color_attr_update(self, context):
+        # 컬러 어트리뷰트가 변경되면 기존 컬러 리스트 초기화
+        clear_color_lists(context.scene)
+    
+    color_attribute = bpy.props.EnumProperty(
         name="Color Attribute",
-        items=color_attr_items
+        items=color_attr_items,
+        update=color_attr_update
     )
 
 # --- 등록/해제 함수 수정 ---
