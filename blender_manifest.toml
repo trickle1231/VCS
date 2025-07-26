@@ -3,13 +3,8 @@ schema_version = "1.0.0"
 # Example of manifest file for a Blender extension
 # Change the values according to your extension
 id = "VCS"
-<<<<<<< HEAD
 version = "1.0.5"
 name = "Vertex Color Selector"
-=======
-version = "1.0.2"
-name = "VCS"
->>>>>>> parent of 68ae73e (4.5지원)
 tagline = "VertexColor Select tool"
 maintainer = "D31"
 # Supported types: "add-on", "theme"
