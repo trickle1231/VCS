@@ -38,31 +38,6 @@ def get_color_attribute_names(obj):
         return []
     return [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
 
-def get_color_data_from_face(bm, face, color_attr_name, mesh):
-    """Face에서 색상 데이터를 가져오는 함수 (FLOAT_COLOR와 BYTE_COLOR 모두 지원)"""
-    # 먼저 bmesh의 color layer에서 시도
-    color_layer = bm.loops.layers.color.get(color_attr_name)
-    if color_layer:
-        return [tuple(loop[color_layer][:3]) for loop in face.loops]
-    
-    # bmesh에서 찾을 수 없으면 color_attributes에서 직접 접근
-    color_attr = mesh.color_attributes.get(color_attr_name)
-    if not color_attr or color_attr.domain != 'CORNER':
-        return None
-    
-    # Face의 loop indices를 기반으로 색상 데이터 추출
-    colors = []
-    for loop in face.loops:
-        loop_index = loop.index
-        if loop_index < len(color_attr.data):
-            color_data = color_attr.data[loop_index]
-            if hasattr(color_data, 'color'):
-                colors.append(tuple(color_data.color[:3]))
-            elif hasattr(color_data, 'color_srgb'):
-                colors.append(tuple(color_data.color_srgb[:3]))
-    
-    return colors if colors else None
-
 def clear_color_lists(scene):
     # EnumProperty를 빈 items로 재정의
     bpy.types.Scene.vc_selector_face_colors = bpy.props.EnumProperty(
@@ -81,53 +56,82 @@ class VERTEXCOLOR_OT_find_face_colors(bpy.types.Operator):
         scene = context.scene
         obj = context.active_object
 
-        # Edit 모드가 아니면 에러 메시지
-        if context.mode != 'EDIT_MESH':
-            self.report({'ERROR'}, "Find Colors is only available in Edit Mode!")
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No mesh object selected")
             return {'CANCELLED'}
 
-        current_mesh_id = obj.data.name if obj and obj.data else ""
-        last_mesh_id = getattr(scene, "vc_selector_last_mesh_id", "")
-        if current_mesh_id != last_mesh_id:
-            clear_color_lists(scene)
-            scene.vc_selector.last_mesh_id = current_mesh_id
-
-        bm = bmesh.from_edit_mesh(obj.data)
-        attr_name = scene.vc_selector.color_attribute
+        # 현재 모드 저장
+        original_mode = obj.mode
         
-        # FLOAT_COLOR와 BYTE_COLOR 모두 지원하는 새로운 함수 사용
-        seen_colors = set()
-        items = []
-        color_list = []
-        idx = 1
-        
-        for face in bm.faces:
-            colors = get_color_data_from_face(bm, face, attr_name, obj.data)
-            if not colors:
-                self.report({'ERROR'}, f"No color data found for attribute '{attr_name}'")
+        # Edit 모드가 아니면 잠시 Edit 모드로 전환
+        if context.mode != 'EDIT_MESH':
+            try:
+                bpy.ops.object.mode_set(mode='EDIT')
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to switch to Edit mode: {str(e)}")
                 return {'CANCELLED'}
-            avg_linear = tuple(round(sum(c[i] for c in colors)/len(colors), 4) for i in range(3))
-            if avg_linear in seen_colors:
-                continue
-            seen_colors.add(avg_linear)
-            label = f"Col_{idx}"
-            name = label
-            items.append((str(avg_linear), label, ""))
-            color_list.append((name, avg_linear))
-            idx += 1
 
-        bpy.types.Scene.vc_selector_face_colors = bpy.props.EnumProperty(
-            name="Face Colors",
-            items=items
-        )
-        self.report({'INFO'}, f"{len(items)} face colors found")
+        try:
+            # 컬러 어트리뷰트 타입 검증
+            color_attr_name = scene.vc_selector.color_attribute
+            if color_attr_name:
+                color_attr = obj.data.color_attributes.get(color_attr_name)
+                if color_attr:
+                    if color_attr.domain != 'CORNER':
+                        self.report({'ERROR'}, "Color attribute domain must be Face Corner")
+                        return {'CANCELLED'}
+                    if color_attr.data_type != 'BYTE_COLOR':
+                        self.report({'ERROR'}, "Color attribute type must be Byte Color (Check: Face Corner, Byte Color type)")
+                        return {'CANCELLED'}
 
-        # 컬러 미리보기 업데이트
-        scene.vc_selector.color_previews.clear()
-        for name, avg_linear in color_list:
-            item = scene.vc_selector.color_previews.add()
-            item.name = name
-            item.color = avg_linear
+            current_mesh_id = obj.data.name if obj and obj.data else ""
+            last_mesh_id = getattr(scene, "vc_selector_last_mesh_id", "")
+            if current_mesh_id != last_mesh_id:
+                clear_color_lists(scene)
+                scene.vc_selector.last_mesh_id = current_mesh_id
+
+            bm = bmesh.from_edit_mesh(obj.data)
+            color_layer = bm.loops.layers.color.get(scene.vc_selector.color_attribute)
+            if not color_layer:
+                self.report({'ERROR'}, "No vertex color layer found")
+                return {'CANCELLED'}
+
+            seen_colors = set()
+            items = []
+            color_list = []
+            idx = 1
+            for face in bm.faces:
+                colors = [tuple(loop[color_layer][:3]) for loop in face.loops]
+                avg_linear = tuple(round(sum(c[i] for c in colors)/len(colors), 4) for i in range(3))
+                if avg_linear in seen_colors:
+                    continue
+                seen_colors.add(avg_linear)
+                label = f"Col_{idx}"
+                name = label
+                items.append((str(avg_linear), label, ""))
+                color_list.append((name, avg_linear))
+                idx += 1
+
+            bpy.types.Scene.vc_selector_face_colors = bpy.props.EnumProperty(
+                name="Face Colors",
+                items=items
+            )
+            self.report({'INFO'}, f"{len(items)} face colors found")
+
+            # 컬러 미리보기 업데이트
+            scene.vc_selector.color_previews.clear()
+            for name, avg_linear in color_list:
+                item = scene.vc_selector.color_previews.add()
+                item.name = name
+                item.color = avg_linear
+
+        finally:
+            # 원래 모드로 복원 (반드시 실행)
+            if original_mode != 'EDIT':
+                try:
+                    bpy.ops.object.mode_set(mode=original_mode)
+                except Exception as e:
+                    self.report({'WARNING'}, f"Failed to restore original mode '{original_mode}': {str(e)}")
 
         return {'FINISHED'}
 
@@ -140,17 +144,29 @@ class VERTEXCOLOR_OT_select_faces_by_face_color(bpy.types.Operator):
         obj = context.active_object
         mode = obj.mode
 
+        # 컬러 어트리뷰트 타입 검증
+        color_attr_name = scene.vc_selector.color_attribute
+        if color_attr_name:
+            color_attr = obj.data.color_attributes.get(color_attr_name)
+            if color_attr:
+                if color_attr.domain != 'CORNER':
+                    self.report({'ERROR'}, "Color attribute domain must be Face Corner")
+                    return {'CANCELLED'}
+                if color_attr.data_type != 'BYTE_COLOR':
+                    self.report({'ERROR'}, "Color attribute type must be Byte Color (Check: Face Corner, Byte Color type)")
+                    return {'CANCELLED'}
+
         target_color = eval(scene.vc_selector.face_colors)
         threshold = 0.01  # VC_SELECTOR_THRESHOLD로 대체
 
         if mode == 'EDIT':
             bm = bmesh.from_edit_mesh(obj.data)
-            attr_name = scene.vc_selector.color_attribute
-            
+            color_layer = bm.loops.layers.color.get(scene.vc_selector.color_attribute)
+            if not color_layer:
+                self.report({'ERROR'}, "No vertex color layer found")
+                return {'CANCELLED'}
             for face in bm.faces:
-                colors = get_color_data_from_face(bm, face, attr_name, obj.data)
-                if not colors:
-                    continue
+                colors = [tuple(loop[color_layer][:3]) for loop in face.loops]
                 avg_linear = tuple(round(sum(c[i] for c in colors)/len(colors), 4) for i in range(3))
                 face.select_set(color_close(avg_linear, target_color, threshold))
             bmesh.update_edit_mesh(obj.data)
@@ -189,6 +205,19 @@ class VERTEXCOLOR_OT_select_this_color(bpy.types.Operator):
         scene = context.scene
         obj = context.active_object
         mode = obj.mode
+        
+        # 컬러 어트리뷰트 타입 검증
+        color_attr_name = scene.vc_selector.color_attribute
+        if color_attr_name:
+            color_attr = obj.data.color_attributes.get(color_attr_name)
+            if color_attr:
+                if color_attr.domain != 'CORNER':
+                    self.report({'ERROR'}, "Color attribute domain must be Face Corner")
+                    return {'CANCELLED'}
+                if color_attr.data_type != 'BYTE_COLOR':
+                    self.report({'ERROR'}, "Color attribute type must be Byte Color (Check: Face Corner, Byte Color type)")
+                    return {'CANCELLED'}
+        
         threshold = 0.01  # VC_SELECTOR_THRESHOLD로 대체
         target_color = tuple(self.color)
         shift = getattr(self, "shift", False)
@@ -196,12 +225,12 @@ class VERTEXCOLOR_OT_select_this_color(bpy.types.Operator):
 
         if mode == 'EDIT':
             bm = bmesh.from_edit_mesh(obj.data)
-            attr_name = scene.vc_selector.color_attribute
-            
+            color_layer = bm.loops.layers.color.get(scene.vc_selector.color_attribute)
+            if not color_layer:
+                self.report({'ERROR'}, "No vertex color layer found")
+                return {'CANCELLED'}
             for face in bm.faces:
-                colors = get_color_data_from_face(bm, face, attr_name, obj.data)
-                if not colors:
-                    continue
+                colors = [tuple(loop[color_layer][:3]) for loop in face.loops]
                 avg_linear = tuple(round(sum(c[i] for c in colors)/len(colors), 4) for i in range(3))
                 if color_close(avg_linear, target_color, threshold):
                     if ctrl:
@@ -244,6 +273,60 @@ class VERTEXCOLOR_OT_clear_color_lists(bpy.types.Operator):
         self.report({'INFO'}, "Color list has been initialized.")
         return {'FINISHED'}
 
+# --- 컬러 어트리뷰트 변환 오퍼레이터 추가 ---
+class VERTEXCOLOR_OT_convert_color_attributes(bpy.types.Operator):
+    bl_idname = "mesh.convert_color_attributes"
+    bl_label = "Convert to Face Corner + Byte Color"
+    bl_description = "Convert all color attributes to Face Corner domain and Byte Color data type"
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No mesh object selected")
+            return {'CANCELLED'}
+
+        # 현재 모드 저장
+        original_mode = obj.mode
+        
+        # Edit 모드인 경우 잠시 Vertex Paint 모드로 전환
+        if original_mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='VERTEX_PAINT')
+
+        mesh = obj.data
+        converted_count = 0
+        
+        # 모든 컬러 어트리뷰트를 순회하며 변환
+        for attr in list(mesh.color_attributes):  # list()로 복사하여 순회 중 변경 방지
+            needs_conversion = False
+            
+            # 도메인 또는 데이터 타입이 다르면 변환 필요
+            if attr.domain != 'CORNER' or attr.data_type != 'BYTE_COLOR':
+                needs_conversion = True
+            
+            if needs_conversion:
+                # 현재 active 컬러 어트리뷰트로 설정
+                mesh.color_attributes.active = attr
+                
+                try:
+                    # Blender의 내장 변환 오퍼레이터 사용
+                    bpy.ops.geometry.color_attribute_convert(domain='CORNER', data_type='BYTE_COLOR')
+                    converted_count += 1
+                    
+                except Exception as e:
+                    self.report({'ERROR'}, f"Failed to convert attribute '{attr.name}': {str(e)}")
+                    continue
+
+        # 원래 모드로 복원
+        if original_mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='EDIT')
+
+        if converted_count > 0:
+            self.report({'INFO'}, f"Converted {converted_count} color attribute(s) to Face Corner + Byte Color")
+        else:
+            self.report({'INFO'}, "All color attributes are already Face Corner + Byte Color")
+        
+        return {'FINISHED'}
+
 # --- 패널에 컬러 리스트 초기화 버튼 추가 ---
 class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
     bl_label = "Select Faces by Vertex Color"
@@ -255,15 +338,45 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        # Edit, Vertex Paint, Weight Paint, Texture Paint 모드에서만 표시
-        return obj and obj.type == 'MESH' and context.mode in {
-            'EDIT_MESH', 'PAINT_VERTEX', 'PAINT_WEIGHT', 'PAINT_TEXTURE'
-        }
+        # 메시 오브젝트가 있어야 표시 (모드 제한 제거)
+        return obj and obj.type == 'MESH'
 
     def draw(self, context):
         layout = self.layout
         scene = context.scene
         obj = context.active_object
+
+        # Object Mode에서 주의사항 표시
+        if context.mode == 'OBJECT':
+            box = layout.box()
+            box.label(text="Usage Notes:", icon='INFO')
+            box.label(text="1. Color Attribute type: Face Corner, Byte Color type")
+            box.label(text="2. This addon works only in Edit/Paint modes")
+            
+            # 조건에 맞지 않는 컬러 어트리뷰트가 있는지 확인
+            needs_conversion = False
+            for attr in obj.data.color_attributes:
+                if attr.domain != 'CORNER' or attr.data_type != 'BYTE_COLOR':
+                    needs_conversion = True
+                    break
+            
+            # 변환이 필요한 경우에만 경고와 버튼 표시
+            if needs_conversion:
+                layout.separator()
+                warning_box = layout.box()
+                warning_box.label(text="Color attributes need conversion!", icon='ERROR')
+                layout.label(text="🔽 Convert color attribute domain")
+                layout.label(text="     and data type to <Face Corner> & <Byte Color>")
+                layout.operator("mesh.convert_color_attributes", text="⚠️ Fix Color Attributes", icon='MODIFIER')
+            
+            return
+
+        # Edit, Vertex Paint, Weight Paint, Texture Paint 모드에서만 기능 활성화
+        if context.mode not in {'EDIT_MESH', 'PAINT_VERTEX', 'PAINT_WEIGHT', 'PAINT_TEXTURE'}:
+            box = layout.box()
+            box.label(text="Unsupported Mode", icon='ERROR')
+            box.label(text="Switch to Edit or Paint mode")
+            return
 
         # 컬러 속성 목록
         attr_names = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER'] if obj and obj.type == 'MESH' else []
@@ -275,21 +388,32 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
         # Color Attribute 선택 (한 번만!)
         layout.prop(scene.vc_selector, "color_attribute", text="Color")
 
+        # 잘못된 컬러 어트리뷰트 경고 표시
+        warnings = []
+        for attr in obj.data.color_attributes:
+            if attr.domain != 'CORNER':
+                warnings.append(f"'{attr.name}': Domain must be converted to Face Corner")
+            if attr.data_type != 'BYTE_COLOR':
+                warnings.append(f"'{attr.name}': Data type must be converted to Byte Color")
+        
+        if warnings:
+            box = layout.box()
+            box.label(text="Color Attribute Warnings:", icon='ERROR')
+            for warning in warnings:
+                box.label(text=warning, icon='DOT')
+            # 경고가 있을 때 Fix 버튼 추가 (모든 모드에서)
+            layout.operator("mesh.convert_color_attributes", text="⚠️ Fix Color Attributes", icon='MODIFIER')
+            # 구분선 추가
+            layout.separator()
+
         is_edit_mode = (context.mode == 'EDIT_MESH')
 
         # Color list manual reset button
+        layout.separator()
         layout.operator("mesh.clear_color_lists", text="Clear Color List")
 
-        # Find Colors UI
-        find_row = layout.row()
-        find_row.enabled = is_edit_mode
-        find_row.operator("mesh.find_face_colors", text="Find Colors")
-        if not is_edit_mode:
-            box = layout.box()
-            box.label(
-                text="Edit Mode Only",
-                icon='ERROR'
-            )
+        # Find Colors UI - 모든 모드에서 활성화
+        layout.operator("mesh.find_face_colors", text="Find Colors")
 
         layout.label(text="Find Vertex Colors")
 
@@ -384,6 +508,17 @@ class VCS_OT_pick_vertex_color(bpy.types.Operator):
 
             color_attr_name = context.scene.vc_selector.color_attribute
 
+            # 컬러 어트리뷰트 타입 검증
+            if color_attr_name:
+                color_attr = obj.data.color_attributes.get(color_attr_name)
+                if color_attr:
+                    if color_attr.domain != 'CORNER':
+                        self.report({'ERROR'}, "Color attribute domain must be Face Corner")
+                        return {'CANCELLED'}
+                    if color_attr.data_type != 'BYTE_COLOR':
+                        self.report({'ERROR'}, "Color attribute type must be Byte Color (Check: Face Corner, Byte Color type)")
+                        return {'CANCELLED'}
+
             if obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(obj.data)
                 bm.faces.ensure_lookup_table()
@@ -391,10 +526,11 @@ class VCS_OT_pick_vertex_color(bpy.types.Operator):
                     self.report({'ERROR'}, "Face index out of range in bmesh")
                     return {'CANCELLED'}
                 face = bm.faces[face_index]
-                colors = get_color_data_from_face(bm, face, color_attr_name, obj.data)
-                if not colors:
-                    self.report({'ERROR'}, "No color data found for face")
+                color_layer = bm.loops.layers.color.get(color_attr_name)
+                if not color_layer:
+                    self.report({'ERROR'}, "No vertex color layer found in bmesh")
                     return {'CANCELLED'}
+                colors = [loop[color_layer][:3] for loop in face.loops]
             else:
                 # 항상 obj.data 사용 (페인트 모드 포함)
                 mesh = obj.data
@@ -432,10 +568,12 @@ class VCS_OT_pick_vertex_color(bpy.types.Operator):
 
             if obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(obj.data)
+                color_layer = bm.loops.layers.color.get(color_attr_name)
+                if not color_layer:
+                    self.report({'ERROR'}, "No vertex color layer found")
+                    return {'CANCELLED'}
                 for face in bm.faces:
-                    face_colors = get_color_data_from_face(bm, face, color_attr_name, obj.data)
-                    if not face_colors:
-                        continue
+                    face_colors = [tuple(loop[color_layer][:3]) for loop in face.loops]
                     face_avg = tuple(round(sum(c[i] for c in face_colors)/len(face_colors), 4) for i in range(3))
                     if color_close(face_avg, avg_color, threshold):
                         if ctrl:
@@ -505,6 +643,7 @@ def register():
     bpy.utils.register_class(VERTEXCOLOR_OT_select_faces_by_face_color)
     bpy.utils.register_class(VERTEXCOLOR_OT_select_this_color)
     bpy.utils.register_class(VERTEXCOLOR_OT_clear_color_lists)
+    bpy.utils.register_class(VERTEXCOLOR_OT_convert_color_attributes)
     bpy.utils.register_class(VERTEXCOLOR_PT_select_panel)
     bpy.utils.register_class(VCS_OT_pick_vertex_color)
     bpy.types.Scene.vc_selector = bpy.props.PointerProperty(type=VCSelectorProperties)
@@ -517,6 +656,7 @@ def unregister():
     bpy.utils.unregister_class(VERTEXCOLOR_OT_select_faces_by_face_color)
     bpy.utils.unregister_class(VERTEXCOLOR_OT_select_this_color)
     bpy.utils.unregister_class(VERTEXCOLOR_OT_clear_color_lists)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_convert_color_attributes)
     bpy.utils.unregister_class(VERTEXCOLOR_PT_select_panel)
     bpy.utils.unregister_class(VCS_OT_pick_vertex_color)
 
