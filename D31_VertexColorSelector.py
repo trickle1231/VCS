@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Vertex Color Selector",
     "author": "Your Name",
-    "version": (1, 0, 0),
+    "version": (1, 0, 6),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Vertex Color",
     "description": "Select faces by vertex color",
@@ -10,6 +10,7 @@ bl_info = {
 
 import bpy
 import bmesh
+from bpy.app.handlers import persistent
 
 # Blender 버전 호환성 처리
 try:
@@ -17,6 +18,62 @@ try:
 except ImportError:
     import bpy_extras
     view3d_utils = bpy_extras.view3d_utils
+
+def get_color_attr_items(scene, context):
+    """전역 함수로 color attribute items를 반환"""
+    obj = context.active_object if context else None
+    items = []
+    
+    if obj and obj.type == 'MESH':
+        for attr in obj.data.color_attributes:
+            if attr.domain == 'CORNER':
+                items.append((attr.name, attr.name, f"Color attribute: {attr.name}"))
+    
+    if not items:
+        items.append(("NONE", "No Color Attributes", "No CORNER domain color attributes found"))
+    
+    return items
+
+def ensure_valid_color_attribute(context):
+    """유효한 컬러 어트리뷰트가 선택되도록 보장"""
+    if not context or not hasattr(context, 'scene'):
+        return
+    
+    scene = context.scene
+    if not hasattr(scene, 'vc_selector'):
+        return
+    
+    obj = context.active_object
+    if not obj or obj.type != 'MESH':
+        return
+    
+    # 현재 선택된 어트리뷰트 확인 - 안전한 접근
+    try:
+        current_attr = getattr(scene.vc_selector, "color_attribute", None)
+    except (AttributeError, TypeError):
+        current_attr = None
+    
+    # 사용 가능한 CORNER 어트리뷰트 목록
+    available_attrs = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
+    
+    # 현재 선택된 어트리뷰트가 유효하지 않으면 첫 번째 사용 가능한 것으로 설정
+    if not current_attr or current_attr == "NONE" or current_attr not in available_attrs:
+        if available_attrs:
+            try:
+                scene.vc_selector.color_attribute = available_attrs[0]
+            except (AttributeError, TypeError):
+                pass  # PropertyGroup이 아직 초기화되지 않은 경우
+        else:
+            try:
+                scene.vc_selector.color_attribute = "NONE"
+            except (AttributeError, TypeError):
+                pass  # PropertyGroup이 아직 초기화되지 않은 경우
+
+@persistent
+def scene_update_handler(scene):
+    """씬이 업데이트될 때 color attribute 목록을 갱신하고 유효성 검증"""
+    context = bpy.context
+    ensure_valid_color_attribute(context)
 
 VC_SELECTOR_THRESHOLD = 0.01
 
@@ -61,19 +118,24 @@ class VERTEXCOLOR_OT_find_face_colors(bpy.types.Operator):
             self.report({'ERROR'}, "Find Colors is only available in Edit Mode!")
             return {'CANCELLED'}
         
-        # 컬러 어트리뷰트 검증
-        if not scene.vc_selector.color_attribute or scene.vc_selector.color_attribute == "NONE":
-            self.report({'ERROR'}, "No color attribute selected!")
+        # 컬러 어트리뷰트 검증 - 안전한 접근 방법
+        try:
+            color_attr_name = getattr(scene.vc_selector, "color_attribute", None)
+            if not color_attr_name or color_attr_name == "NONE":
+                self.report({'ERROR'}, "No color attribute selected!")
+                return {'CANCELLED'}
+        except (AttributeError, TypeError):
+            self.report({'ERROR'}, "Color attribute property not initialized!")
             return {'CANCELLED'}
         
         # 선택된 어트리뷰트가 실제로 존재하는지 확인
-        color_attr = obj.data.color_attributes.get(scene.vc_selector.color_attribute)
+        color_attr = obj.data.color_attributes.get(color_attr_name)
         if not color_attr:
-            self.report({'ERROR'}, f"Color attribute '{scene.vc_selector.color_attribute}' not found!")
+            self.report({'ERROR'}, f"Color attribute '{color_attr_name}' not found!")
             return {'CANCELLED'}
         
         if color_attr.domain != 'CORNER':
-            self.report({'ERROR'}, f"Color attribute '{scene.vc_selector.color_attribute}' must be CORNER domain!")
+            self.report({'ERROR'}, f"Color attribute '{color_attr_name}' must be CORNER domain!")
             return {'CANCELLED'}
 
         current_mesh_id = obj.data.name if obj and obj.data else ""
@@ -83,7 +145,7 @@ class VERTEXCOLOR_OT_find_face_colors(bpy.types.Operator):
             scene.vc_selector.last_mesh_id = current_mesh_id
 
         bm = bmesh.from_edit_mesh(obj.data)
-        color_layer = bm.loops.layers.color.get(scene.vc_selector.color_attribute)
+        color_layer = bm.loops.layers.color.get(color_attr_name)
         if not color_layer:
             self.report({'ERROR'}, "No vertex color layer found")
             return {'CANCELLED'}
@@ -226,6 +288,102 @@ class VERTEXCOLOR_OT_select_this_color(bpy.types.Operator):
 
         return {'FINISHED'}
 
+# --- Attribute Refresh 오퍼레이터 ---
+class VERTEXCOLOR_OT_refresh_color_attributes(bpy.types.Operator):
+    bl_idname = "mesh.refresh_color_attributes"
+    bl_label = "Attribute Refresh"
+    bl_description = "Refresh and update the color attribute list"
+    
+    def execute(self, context):
+        scene = context.scene
+        obj = context.active_object
+        
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No mesh object selected!")
+            return {'CANCELLED'}
+        
+        # PropertyGroup이 제대로 초기화되었는지 확인
+        if not hasattr(scene, 'vc_selector'):
+            self.report({'ERROR'}, "VCS PropertyGroup not initialized!")
+            return {'CANCELLED'}
+        
+        # CORNER 도메인 어트리뷰트 찾기
+        corner_attrs = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
+        
+        # 디버그 정보 출력 (Refresh 버튼을 눌렀을 때만)
+        print(f"[VCS Debug] Attribute Refresh executed")
+        print(f"[VCS Debug] Available: {len(corner_attrs)} CORNER attributes")
+        for attr in obj.data.color_attributes:
+            print(f"[VCS Debug]   • {attr.name} ({attr.domain})")
+        
+        if not corner_attrs:
+            self.report({'WARNING'}, "No CORNER color attributes found!")
+            # 빈 목록으로 EnumProperty 업데이트
+            items = [("NONE", "No Color Attributes", "No CORNER domain color attributes found")]
+        else:
+            # 찾은 어트리뷰트로 EnumProperty items 생성
+            items = [(attr, attr, f"Color attribute: {attr}") for attr in corner_attrs]
+            # 현재 어트리뷰트가 유효하지 않으면 첫 번째로 설정 (매우 안전하게)
+            try:
+                if hasattr(scene.vc_selector, 'color_attribute'):
+                    current_attr = getattr(scene.vc_selector, 'color_attribute', None)
+                    if not current_attr or current_attr == "NONE" or current_attr not in corner_attrs:
+                        scene.vc_selector.color_attribute = corner_attrs[0]
+                        print(f"[VCS Debug] Set default attribute to: {corner_attrs[0]}")
+            except Exception as e:
+                print(f"[VCS Debug] Could not set default attribute: {e}")
+        
+        # EnumProperty 동적 업데이트를 위해 PropertyGroup 재정의
+        try:
+            # 먼저 기존 items 삭제
+            if hasattr(bpy.types.Scene, 'vc_selector_color_attr_items'):
+                delattr(bpy.types.Scene, 'vc_selector_color_attr_items')
+            
+            # 새로운 items 설정
+            bpy.types.Scene.vc_selector_color_attr_items = items
+            print(f"[VCS Debug] Updated items list with {len(items)} entries")
+            
+            # PropertyGroup을 강제로 다시 등록하여 EnumProperty 갱신
+            # 이는 동적 items가 제대로 업데이트되도록 함
+            prop_class = scene.vc_selector.__class__
+            if hasattr(prop_class, 'color_attribute'):
+                print(f"[VCS Debug] PropertyGroup has color_attribute property")
+            
+            # UI 강제 업데이트
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+                    
+        except Exception as e:
+            print(f"[VCS Debug] Error updating items: {e}")
+        
+        self.report({'INFO'}, f"Found {len(corner_attrs)} CORNER color attributes")
+        return {'FINISHED'}
+
+# --- 컬러 어트리뷰트 설정 오퍼레이터 ---
+class VERTEXCOLOR_OT_set_color_attribute(bpy.types.Operator):
+    bl_idname = "mesh.set_color_attribute"
+    bl_label = "Set Color Attribute"
+    bl_description = "Set the selected color attribute"
+    
+    attr_name = bpy.props.StringProperty()
+    
+    def execute(self, context):
+        # 현재 어트리뷰트가 유효한지 확인
+        obj = context.active_object
+        if obj and obj.type == 'MESH':
+            corner_attrs = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
+            if self.attr_name in corner_attrs:
+                context.scene.vc_selector.color_attribute = self.attr_name
+                self.report({'INFO'}, f"Color attribute set to: {self.attr_name}")
+            else:
+                self.report({'ERROR'}, f"Color attribute '{self.attr_name}' not found or not CORNER domain!")
+                return {'CANCELLED'}
+        else:
+            self.report({'ERROR'}, "No mesh object selected!")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
 # --- 컬러 리스트 수동 초기화 오퍼레이터 추가 ---
 class VERTEXCOLOR_OT_clear_color_lists(bpy.types.Operator):
     bl_idname = "mesh.clear_color_lists"
@@ -259,32 +417,65 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
         scene = context.scene
         obj = context.active_object
 
-        # 컬러 속성 목록 체크
-        corner_attrs = []
-        if obj and obj.type == 'MESH':
-            corner_attrs = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
-        
-        if not corner_attrs:
-            box = layout.box()
-            box.label(text="No CORNER Color Attributes Found", icon='ERROR')
-            if obj and obj.type == 'MESH' and obj.data.color_attributes:
-                box.label(text="(Only CORNER domain attributes supported)")
-                # 사용 가능한 어트리뷰트들 표시
-                for attr in obj.data.color_attributes:
-                    box.label(text=f"• {attr.name} ({attr.domain})", icon='DOT')
+        # 항상 리프레시 버튼을 맨 위에 표시
+        layout.operator("mesh.refresh_color_attributes", text="Attribute Refresh", icon='FILE_REFRESH')
+
+        # PropertyGroup 초기화 확인
+        if not hasattr(scene, 'vc_selector') or scene.vc_selector is None:
+            layout.label(text="VCS PropertyGroup not initialized", icon='ERROR')
+            layout.label(text="Click Attribute Refresh to initialize", icon='INFO')
             return
 
-        # Color Attribute 선택
-        attr_box = layout.box()
-        attr_box.label(text=f"Available Color Attributes: {len(corner_attrs)}")
-        row = attr_box.row()
-        row.prop(scene.vc_selector, "color_attribute", text="Color Attribute")
+        # 색상 어트리뷰트 속성이 실제로 존재하는지 확인
+        if not hasattr(scene.vc_selector, 'color_attribute'):
+            layout.label(text="color_attribute property not found", icon='ERROR')
+            layout.label(text="Click Attribute Refresh to fix", icon='INFO')
+            return
+            
+        # 컬러 어트리뷰트 드롭다운 - 최대한 안전한 표시
+        dropdown_success = False
+        current_attr = None
         
-        # 현재 선택된 어트리뷰트가 유효한지 확인
-        current_attr = scene.vc_selector.color_attribute
-        if current_attr and current_attr not in corner_attrs:
+        # 먼저 현재 선택된 값을 안전하게 읽기
+        try:
+            current_attr = getattr(scene.vc_selector, "color_attribute", None)
+        except (AttributeError, TypeError):
+            current_attr = None
+        
+        # 드롭다운 시도
+        try:
+            # PropertyGroup 클래스에 속성이 정의되어 있는지 확인
+            prop_class = scene.vc_selector.__class__
+            if hasattr(prop_class, 'color_attribute') and hasattr(scene.vc_selector, 'color_attribute'):
+                # 추가 검증: 실제로 접근 가능한지 테스트
+                test_value = scene.vc_selector.color_attribute
+                layout.prop(scene.vc_selector, "color_attribute", text="Color Attribute")
+                dropdown_success = True
+        except Exception as e:
+            print(f"[VCS Debug] Dropdown error: {e}")
+            dropdown_success = False
+        
+        if not dropdown_success:
+            # 드롭다운이 실패하면 현재 값과 함께 대체 표시
+            if current_attr and current_attr != "NONE":
+                layout.label(text=f"Color Attribute: {current_attr}", icon='COLOR')
+            else:
+                layout.label(text="Color Attribute: Click Refresh button", icon='INFO')
+        
+        # 현재 선택값 확인 (이미 위에서 읽었음)
+        # current_attr은 이미 안전하게 읽었으므로 추가 접근 불필요
+        
+        if not current_attr or current_attr == "NONE":
             box = layout.box()
-            box.label(text="Selected attribute not available!", icon='ERROR')
+            box.label(text="No color attribute selected", icon='INFO')
+            if obj and obj.type == 'MESH':
+                corner_attrs = [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
+                if not corner_attrs:
+                    box.label(text="No CORNER color attributes found")
+                    if obj.data.color_attributes:
+                        box.label(text="Available attributes (wrong domain):")
+                        for attr in obj.data.color_attributes:
+                            box.label(text=f"  • {attr.name} ({attr.domain})")
             return
 
         is_edit_mode = (context.mode == 'EDIT_MESH')
@@ -306,9 +497,18 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
         layout.label(text="Find Vertex Colors")
 
         # 컬러 리스트 표시
-        face_colors = getattr(scene.vc_selector, "face_colors", None)
-        color_previews = getattr(scene.vc_selector, "color_previews", None)
-        if face_colors is None or color_previews is None or len(color_previews) == 0:
+        try:
+            face_colors = getattr(scene.vc_selector, "face_colors", None)
+            color_previews = getattr(scene.vc_selector, "color_previews", None)
+            
+            # PropertyGroup의 CollectionProperty는 len() 대신 이렇게 체크
+            if (face_colors is None or 
+                color_previews is None or 
+                not hasattr(color_previews, '__len__') or 
+                len(list(color_previews)) == 0):
+                return
+        except (TypeError, AttributeError):
+            # _PropertyDeferred 오류 방지
             return
 
         # 안내 박스
@@ -493,6 +693,27 @@ class VCSelectorColorPreview(bpy.types.PropertyGroup):
     name = bpy.props.StringProperty()
     color = bpy.props.FloatVectorProperty(subtype='COLOR_GAMMA', size=3, min=0.0, max=1.0)
 
+def get_refreshed_color_attr_items(self, context):
+    """Refresh된 color attribute items를 반전"""
+    try:
+        # 안전하게 items 가져오기
+        items = getattr(bpy.types.Scene, 'vc_selector_color_attr_items', None)
+        if items and isinstance(items, list) and len(items) > 0:
+            # 리스트가 올바른 형식인지 검증
+            valid_items = []
+            for item in items:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    valid_items.append(item)
+            if valid_items:
+                return valid_items
+        
+        # 기본값 반환
+        return [("NONE", "Click Attribute Refresh", "Click Attribute Refresh button to scan color attributes")]
+    except Exception as e:
+        # 오류 발생 시 기본값 반환
+        print(f"[VCS Debug] Error in get_refreshed_color_attr_items: {e}")
+        return [("NONE", "Error - Click Refresh", "Error occurred, click Attribute Refresh button")]
+
 class VCSelectorProperties(bpy.types.PropertyGroup):
     face_colors = bpy.props.EnumProperty(
         name="Face Colors",
@@ -508,53 +729,74 @@ class VCSelectorProperties(bpy.types.PropertyGroup):
         default=True
     )
     
-    def color_attr_items(self, context):
-        obj = context.active_object
-        if not obj or obj.type != 'MESH':
-            return [("NONE", "No Color Attributes", "No mesh or no color attributes found")]
-        
-        items = []
-        for attr in obj.data.color_attributes:
-            if attr.domain == 'CORNER':
-                items.append((attr.name, attr.name, f"Color attribute: {attr.name}"))
-        
-        if not items:
-            return [("NONE", "No CORNER Attributes", "No CORNER domain color attributes found")]
-        
-        return items
-    
     def color_attr_update(self, context):
         # 컬러 어트리뷰트가 변경되면 기존 컬러 리스트 초기화
-        clear_color_lists(context.scene)
+        if hasattr(context.scene, 'vc_selector'):
+            clear_color_lists(context.scene)
+        # 변경 후 유효성 다시 확인
+        ensure_valid_color_attribute(context)
     
+    # EnumProperty로 변경하여 드롭다운 제공
     color_attribute = bpy.props.EnumProperty(
         name="Color Attribute",
-        items=color_attr_items,
-        update=color_attr_update
+        items=get_refreshed_color_attr_items,
+        update=color_attr_update,
+        description="Select a color attribute to work with"
     )
 
 # --- 등록/해제 함수 수정 ---
 def register():
+    # 순서가 중요합니다!
     bpy.utils.register_class(VCSelectorColorPreview)
     bpy.utils.register_class(VCSelectorProperties)
+    
+    # PropertyGroup을 Scene에 등록
+    bpy.types.Scene.vc_selector = bpy.props.PointerProperty(type=VCSelectorProperties)
+    
+    # 나머지 클래스들 등록
     bpy.utils.register_class(VERTEXCOLOR_OT_find_face_colors)
     bpy.utils.register_class(VERTEXCOLOR_OT_select_faces_by_face_color)
     bpy.utils.register_class(VERTEXCOLOR_OT_select_this_color)
+    bpy.utils.register_class(VERTEXCOLOR_OT_refresh_color_attributes)
+    bpy.utils.register_class(VERTEXCOLOR_OT_set_color_attribute)
     bpy.utils.register_class(VERTEXCOLOR_OT_clear_color_lists)
     bpy.utils.register_class(VERTEXCOLOR_PT_select_panel)
     bpy.utils.register_class(VCS_OT_pick_vertex_color)
-    bpy.types.Scene.vc_selector = bpy.props.PointerProperty(type=VCSelectorProperties)
+    
+    # 핸들러 등록
+    if scene_update_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(scene_update_handler)
+    
+    print("[VCS] Registration complete")
+    
+    # 등록 직후 기본값 설정
+    try:
+        ensure_valid_color_attribute(bpy.context)
+    except:
+        pass  # 컨텍스트가 없으면 무시
 
 def unregister():
-    del bpy.types.Scene.vc_selector
-    bpy.utils.unregister_class(VCSelectorColorPreview)
-    bpy.utils.unregister_class(VCSelectorProperties)
-    bpy.utils.unregister_class(VERTEXCOLOR_OT_find_face_colors)
-    bpy.utils.unregister_class(VERTEXCOLOR_OT_select_faces_by_face_color)
-    bpy.utils.unregister_class(VERTEXCOLOR_OT_select_this_color)
-    bpy.utils.unregister_class(VERTEXCOLOR_OT_clear_color_lists)
-    bpy.utils.unregister_class(VERTEXCOLOR_PT_select_panel)
+    # 핸들러 해제
+    if scene_update_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(scene_update_handler)
+    
+    # PropertyGroup 해제 (다른 클래스들보다 먼저)
+    if hasattr(bpy.types.Scene, 'vc_selector'):
+        del bpy.types.Scene.vc_selector
+    
+    # 클래스들 해제 (역순으로)
     bpy.utils.unregister_class(VCS_OT_pick_vertex_color)
+    bpy.utils.unregister_class(VERTEXCOLOR_PT_select_panel)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_clear_color_lists)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_set_color_attribute)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_refresh_color_attributes)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_select_this_color)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_select_faces_by_face_color)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_find_face_colors)
+    bpy.utils.unregister_class(VCSelectorProperties)
+    bpy.utils.unregister_class(VCSelectorColorPreview)
+    
+    print("[VCS] Unregistration complete")
 
 if __name__ == "__main__":
     register()
