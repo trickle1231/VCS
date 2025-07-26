@@ -39,10 +39,9 @@ def get_color_attribute_names(obj):
     return [attr.name for attr in obj.data.color_attributes if attr.domain == 'CORNER']
 
 def clear_color_lists(scene):
-    # EnumProperty를 빈 items로 재정의
     bpy.types.Scene.vc_selector_face_colors = bpy.props.EnumProperty(
         name="Face Colors",
-        items=[]
+        items=[("NONE", "No Colors", "No colors found")]  # ← 빈 리스트 대신 기본 아이템
     )
     scene.vc_selector.color_previews.clear()
 
@@ -327,6 +326,32 @@ class VERTEXCOLOR_OT_convert_color_attributes(bpy.types.Operator):
         
         return {'FINISHED'}
 
+# --- 동기화 오퍼레이터 추가
+class VERTEXCOLOR_OT_sync_color_attribute(bpy.types.Operator):
+    bl_idname = "mesh.sync_color_attribute"
+    bl_label = "Sync Attribute"
+    bl_description = "Sync enum selection to match currently active color attribute"
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No mesh object selected")
+            return {'CANCELLED'}
+        
+        # 현재 활성 컬러 어트리뷰트 가져오기
+        color_attrs = obj.data.color_attributes
+        if len(color_attrs) > 0 and color_attrs.active_color_index < len(color_attrs):
+            active_attr_name = color_attrs[color_attrs.active_color_index].name
+            
+            # enum 값을 현재 활성 어트리뷰트로 설정
+            context.scene.vc_selector.color_attribute = active_attr_name
+            
+            self.report({'INFO'}, f"Synced to active color attribute: '{active_attr_name}'")
+        else:
+            self.report({'WARNING'}, "No active color attribute found")
+            
+        return {'FINISHED'}
+
 # --- 패널에 컬러 리스트 초기화 버튼 추가 ---
 class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
     bl_label = "Select Faces by Vertex Color"
@@ -353,21 +378,27 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
             box.label(text="1. Color Attribute type: Face Corner, Byte Color type")
             box.label(text="2. This addon works only in Edit/Paint modes")
             
-            # 조건에 맞지 않는 컬러 어트리뷰트가 있는지 확인
-            needs_conversion = False
+            # 조건에 맞지 않는 컬러 어트리뷰트가 있는지 확인하고 경고 메시지 생성
+            warnings = []
             for attr in obj.data.color_attributes:
-                if attr.domain != 'CORNER' or attr.data_type != 'BYTE_COLOR':
-                    needs_conversion = True
-                    break
+                if attr.domain != 'CORNER':
+                    warnings.append(f"'{attr.name}': Domain must be Face Corner")
+                if attr.data_type != 'BYTE_COLOR':
+                    warnings.append(f"'{attr.name}': Data type must be Byte Color")
             
-            # 변환이 필요한 경우에만 경고와 버튼 표시
-            if needs_conversion:
+            # 경고가 있을 때만 빨간색 경고 박스 표시 (Edit/Paint 모드와 동일한 스타일)
+            if warnings:
                 layout.separator()
                 warning_box = layout.box()
-                warning_box.label(text="Color attributes need conversion!", icon='ERROR')
-                layout.label(text="🔽 Convert color attribute domain")
-                layout.label(text="     and data type to <Face Corner> & <Byte Color>")
-                layout.operator("mesh.convert_color_attributes", text="⚠️ Fix Color Attributes", icon='MODIFIER')
+                warning_box.alert = True  # 빨간색 스타일 적용
+                warning_box.label(text="⚠️ Color Attribute Type Warnings!", icon='ERROR')
+                
+                # 경고 메시지들을 빨간색 박스 안에 표시
+                for warning in warnings:
+                    warning_box.label(text=warning, icon='DOT')
+                
+                # Fix 버튼도 빨간색 박스 안에 포함
+                warning_box.operator("mesh.convert_color_attributes", text="⚠️ Fix Color Attributes", icon='MODIFIER')
             
             return
 
@@ -385,24 +416,52 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
             box.label(text="No Color Attribute", icon='ERROR')
             return
 
-        # Color Attribute 선택 (한 번만!)
+        # Color Attribute 선택
         layout.prop(scene.vc_selector, "color_attribute", text="Color")
 
-        # 잘못된 컬러 어트리뷰트 경고 표시
+        # 동기화 상태 확인 및 경고 표시
+        current_active_attr = None
+        enum_selected_attr = scene.vc_selector.color_attribute
+        
+        if obj and obj.type == 'MESH':
+            color_attrs = obj.data.color_attributes
+            if len(color_attrs) > 0 and color_attrs.active_color_index < len(color_attrs):
+                current_active_attr = color_attrs[color_attrs.active_color_index].name
+
+        # 현재 활성 어트리뷰트와 enum 선택이 다른 경우 경고 표시
+        if current_active_attr and enum_selected_attr and current_active_attr != enum_selected_attr:
+            warning_box = layout.box()
+            warning_box.alert = True
+            warning_box.label(text="⚠️ Attribute Selection Mismatch!", icon='ERROR')
+            
+            # 정보 표시
+            info_col = warning_box.column(align=True)
+            info_col.label(text=f"Blender Active: '{current_active_attr}'")
+            info_col.label(text=f"Addon Selected: '{enum_selected_attr}'")
+            
+            # 동기화 버튼
+            warning_box.operator("mesh.sync_color_attribute", text="🔄 Sync to Active Attribute", icon='FILE_REFRESH')
+
+        # 잘못된 컬러 어트리뷰트 경고 표시 - 빨간색 alert 스타일로 변경
         warnings = []
         for attr in obj.data.color_attributes:
             if attr.domain != 'CORNER':
-                warnings.append(f"'{attr.name}': Domain must be converted to Face Corner")
+                warnings.append(f"'{attr.name}': Domain must be Face Corner")
             if attr.data_type != 'BYTE_COLOR':
-                warnings.append(f"'{attr.name}': Data type must be converted to Byte Color")
+                warnings.append(f"'{attr.name}': Data type must be Byte Color")
         
         if warnings:
-            box = layout.box()
-            box.label(text="Color Attribute Warnings:", icon='ERROR')
+            warning_box = layout.box()
+            warning_box.alert = True  # 빨간색 스타일 적용
+            warning_box.label(text="⚠️ Color Attribute Type Warnings!", icon='ERROR')
+            
+            # 경고 메시지들을 빨간색 박스 안에 표시
             for warning in warnings:
-                box.label(text=warning, icon='DOT')
-            # 경고가 있을 때 Fix 버튼 추가 (모든 모드에서)
-            layout.operator("mesh.convert_color_attributes", text="⚠️ Fix Color Attributes", icon='MODIFIER')
+                warning_box.label(text=warning, icon='DOT')
+            
+            # Fix 버튼도 빨간색 박스 안에 포함
+            warning_box.operator("mesh.convert_color_attributes", text="⚠️ Fix Color Attributes", icon='MODIFIER')
+            
             # 구분선 추가
             layout.separator()
 
@@ -420,7 +479,12 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
         # 컬러 리스트 표시
         face_colors = getattr(scene.vc_selector, "face_colors", None)
         color_previews = getattr(scene.vc_selector, "color_previews", None)
-        if face_colors is None or color_previews is None or len(color_previews) == 0:
+        try:
+            color_count = len(color_previews)
+        except (TypeError, AttributeError):
+            color_count = 0
+        
+        if face_colors is None or color_previews is None or color_count == 0:
             return
 
         # 안내 박스
@@ -431,14 +495,21 @@ class VERTEXCOLOR_PT_select_panel(bpy.types.Panel):
         layout.operator("mesh.pick_vertex_color", text="Pick Vertex Color")
 
         # 컬러 리스트 라벨
-        color_count = len(color_previews)
+        try:
+            color_count = len(color_previews)
+        except (TypeError, AttributeError):
+            color_count = 0
         layout.label(text=f"Color List ({color_count} color{'s' if color_count != 1 else ''} found)")
 
         # 팔레트 폴드 UI
         row = layout.row()
         icon = "TRIA_DOWN" if scene.vc_selector.show_color_list else "TRIA_RIGHT"
         row.prop(scene.vc_selector, "show_color_list", text="", icon=icon, emboss=False)
-        row.label(text=f"Color List ({len(scene.vc_selector.color_previews)} colors found)")
+        try:
+            preview_count = len(scene.vc_selector.color_previews)
+        except (TypeError, AttributeError):
+            preview_count = 0
+        row.label(text=f"Color List ({preview_count} colors found)")
 
         if not scene.vc_selector.show_color_list:
             return
@@ -614,7 +685,8 @@ class VCSelectorColorPreview(bpy.types.PropertyGroup):
 class VCSelectorProperties(bpy.types.PropertyGroup):
     face_colors: bpy.props.EnumProperty(
         name="Face Colors",
-        items=[]
+        items=[("NONE", "No Colors", "No colors found")],  # ← 기본 아이템 추가
+        default="NONE"  # ← 기본값 명시
     )
     color_previews: bpy.props.CollectionProperty(type=VCSelectorColorPreview)
     last_mesh_id: bpy.props.StringProperty(
@@ -644,6 +716,7 @@ def register():
     bpy.utils.register_class(VERTEXCOLOR_OT_select_this_color)
     bpy.utils.register_class(VERTEXCOLOR_OT_clear_color_lists)
     bpy.utils.register_class(VERTEXCOLOR_OT_convert_color_attributes)
+    bpy.utils.register_class(VERTEXCOLOR_OT_sync_color_attribute)  # ← 추가!
     bpy.utils.register_class(VERTEXCOLOR_PT_select_panel)
     bpy.utils.register_class(VCS_OT_pick_vertex_color)
     bpy.types.Scene.vc_selector = bpy.props.PointerProperty(type=VCSelectorProperties)
@@ -657,6 +730,7 @@ def unregister():
     bpy.utils.unregister_class(VERTEXCOLOR_OT_select_this_color)
     bpy.utils.unregister_class(VERTEXCOLOR_OT_clear_color_lists)
     bpy.utils.unregister_class(VERTEXCOLOR_OT_convert_color_attributes)
+    bpy.utils.unregister_class(VERTEXCOLOR_OT_sync_color_attribute)  # ← 추가!
     bpy.utils.unregister_class(VERTEXCOLOR_PT_select_panel)
     bpy.utils.unregister_class(VCS_OT_pick_vertex_color)
 
